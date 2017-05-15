@@ -1,7 +1,9 @@
-""" FIDUCEO test FCDR generation 
+""" Ensemble generation for a simplified Made-Up sensor
+    Project: H2020 FIDUCEO 
     Author: Arta Dilo, NPL M&M
     Date created: 07-03-2016
-    Last update: 31-10-2016 
+    Last update: 15-05-2017 
+    Version: 2.0
 
 CLASS declarations for working with FCDRs, full, easy, ensemble formats: 
 test FCDR generation with different error structure... 
@@ -54,8 +56,8 @@ class ImgBand(object):
         self.nor = rows
         self.noc = columns
         self.pxs = np.zeros((self.nor, self.noc),dtype=float)
-        self.cnts = np.zeros(self.nor,dtype=float)
-        self.tmps = np.zeros(self.nor,dtype=float)
+        self.cnts = np.zeros(self.nor,dtype=float) # calibration counts
+        self.tmps = np.zeros(self.nor,dtype=float) # calib. target temperature
         
     def getNoR(self): # get number of rows in the image
         return self.nor
@@ -97,11 +99,12 @@ class ImgBand(object):
 #    def setPxVal(self, x, y, val): # set the DN of pixel (x,y) to val
 #        self.pxs[x, y] = val
 #
-    def getValArr(self, level): # get values as a 1D array;
+    def getValArr(self, level=0): # get values as a 1D array;
         if level == 1:
-            img = self.evaLE()
+            img = self.evaLE() # Earth radiance
         else:
-            img = self.pxs
+            img = self.pxs # Earth counts
+            
         vals = img.flatten() # a copy of the image collapsed to 1D
         return vals
         
@@ -139,42 +142,56 @@ class Timage(ImgBand):
         self.nor = rows
         self.noc = columns        
         self.pxs = np.full((self.nor, self.noc), CEval, dtype=float)
-        self.cnts = np.full(self.nor, ICnt, dtype=float)
-        self.tmps = np.full(self.nor, ICTmp, dtype=float)
+        self.cnts = ICnt # ICT counts per scanline
+        self.tmps = ICTmp # ICT temperature per scanline
+        
+    def getCalCnts(self):
+        calCnt = self.cnts.copy() # copy of array of calibration counts
+        return calCnt
+        
+    def getCalTemp(self):
+        calTmp = self.tmps.copy() # copy of array of calibration temperatures
+        return calTmp    
         
 
 """ The Error class contains attributes that describe the error structure, i.e. 
-standard uncertainty for each error type of each measured variable. Here 
-the variables 
-For now the attributes are:
+standard uncertainty for each error type of each measured variable. Here the 
+variables are counts and temperature and assumed to have only random uncertainty:
     - counts standard uncertainty, random component
     - (PRTs) temperature standard uncertainty, random component
-    - temperature standard uncertainty, systematic component. 
-Methods of the class store the standard uncertainty for each of the measured 
-variables stored in full-FCDR-full,  from PDFs of counts and temperature 
-and calculate pixel and scanline error using sensitivity coefficients. """
+Methods of the class calculate pixel and scanline error. """
 class Error(object):
     
     def __init__(self, uCnt, uPRT):
-        self.uCounts = uCnt # counts uncertainty
+        self.uCounts = uCnt # count uncertainty
         self.uTemp = uPRT # ICT temperature uncertainty
-
-    def getPxErr(self): # get Earth count error: pixel level
-        Cstd = cp.copy(self.uCounts) * np.sqrt(2) # standard dev for the distrib.
-        pxErr = random.gauss(0, Cstd) # draw error from the normal PDF
-        return pxErr
         
-    def getSlnErr(self): # get error at scanline level
-        Tstd = cp.copy(self.uTemp) # normal distrib. st.dev for ICT temperature
-        Cstd = cp.copy(self.uCounts) * np.sqrt(2) # st.dev for ICT count
-        return attr2
+    def getCntU(self): # Earth count error: pixel level
+        # standard uncertainty of space clamped Earth count 
+        Cstd = cp.copy(self.uCounts) * np.sqrt(2) 
+        return Cstd
+
+    def getTmpU(self): # get temperature uncertainty: scanline level
+        tmpU = cp.copy(self.uCounts)      
+        return tmpU
+
+    def getRadU(self, Img, x): # get ICT radiance uncertainty
+        Tict = Img.getCalDt()[1][x] # ICT temperature        
+        Lstd = radPLU(Tict, ch11, self.uTemp) # st.dev ICT radiance
+        return Lstd
+        
+    def getLEU(self, x, y):
+        Tict = Img.getCalDt()[1][x] # ICT temperature        
+        Lict = radPL(Tict, ch1) # ICT radiance
+        Lstd = radPLU(Tict, ch11, self.uTemp) # st.dev ICT radiance        
+        # ...
 
 
-""" This image contains the measured values. For this test we simulate the 
-measured values image from an assumed truth image and an error structure, (now) 
+""" This image class contains the measured values. For this test we simulate the 
+measured values image from an assumed truth image and an error structure, 
 random error at pixel level, random error at scanline. It is subclass of ImgBand.
-This will be image data from an instrument we work with in Fiduceo. Probably a 
-specialisation of a GDAL class for multi-band image/raster (adding 
+This will be image data from an instrument we work with in Fiduceo, potentially 
+a specialisation of a GDAL class for multi-band image/raster (adding 
 satellite instrument...). """
 class Mimage(ImgBand):
     
@@ -185,37 +202,57 @@ class Mimage(ImgBand):
         
         self.nor = trueImg.getNoR()
         self.noc = trueImg.getNoC()
-        self.pxs = trueImg.getIVals() # set pixel values to trueImg values 
-        scanlineErr = measErr.getSlnErr() # get err at scanline
-        
+        self.pxs = trueImg.getDNs() # set pixel values to trueImg values 
+        self.cnts = trueImg.getCalCnts() # set calib.counts to trueImg values 
+        self.tmps = trueImg.getCalTemp() # set calib.temp to trueImg values 
+        self.crad = radPL(self.tmps, ch11) # ICT radiance from ICT temp
+
         nRow = self.nor     # number of rows
         nCol = self.noc     # number of columns
-        for i in range(nRow):
-            """ Standard deviation calculated from relative scanline error and
-             the first element in the row (this last will change to ...) """
-            lnStd = scanlineErr * self.pxs[i,1] # standard dev. at scanline i
-            lnErr = random.gauss(0, lnStd)
-            
-            for j in range(nCol):
-                pxErr = measErr.getPxErr() # get err at pixel level
-                self.pxs[i,j] += lnErr + pxErr 
+        self.Erad = np.zeros((nRow, nCol),dtype=float) # level 1 image
 
+        for i in range(nRow):   
+            CictU = measErr.getCntU() # get ICT count uncertainty 
+            lnErr = random.gauss(0, CictU) # draw error from the normal PDF 
+            self.tmps[i] += lnErr
+                           
+            TictU = measErr.getTmpU() # get temperature uncertainty
+            lnErr = random.gauss(0, TictU)
+            self.cnts[i] += lnErr
+             
+            LictU = measErr.getRadU(trueImg, i) # get radiance uncertainty 
+            lnErr = random.gauss(0, LictU)
+            self.crad[i] += lnErr
+
+            # add Earth count error to the pixel DN value    
+            for j in range(nCol):
+                CEU = measErr.getCntU() # get ICT count uncertainty 
+                pxErr = random.gauss(0, CEU)
+                self.pxs[i,j] += pxErr 
+        
+        self.Erad = self.evaLE() # Earth radiance
+        
+    def getICTrad(self):
+        Lict = self.crad.copy() # copy of array of ICT radiance
+        return Lict
+        
 
 class hInput(object):
     # TO CHANGE
     def __init__(self, CE, Cict, Tict):
-        self.ECount = CE # Earth counts 
+        self.Ecount = CE # Earth counts 
         self.Cict = Cict # ICT counts 
         self.Tict = Tict # ICT temperature 
 
 
-""" This is an ensemble instance. It is computed from the measurements image 
-and its errors, (for now) a random error at pixel and at scanline level. 
+""" This class presents an ensemble instance computed from measurements  
+image and its errors for level 0 and level 1. 
 The class has attributes:
-    - a 2D array of instance values (calculated from measurements and err struct)
-    - a separate 2D array for errors (in each pixel). 
-Currently it has two ways for calculating instance values: measurement - errors; 
-measurement + errors. """
+    - a 2D array of instance values calculated from measurements and err struct
+    - separate 2D array for errors 
+    - ... the same for level 1 (to be completed) 
+Two ways for calculating instance values: measurement - error; 
+measurement + error. """
 class eInstance(ImgBand):
     
     def __init__(self, measImg, isize, ierr):
@@ -226,22 +263,19 @@ class eInstance(ImgBand):
         
         self.nor = isize[0] # number of rows
         self.noc = isize[1] # number of columns
-        self.pxs = measImg.getIVals() # initialise instance values with measured 
-        self.errs = np.zeros((self.nor, self.noc), dtype=float) # init error
+        self.pxs = measImg.getDNs() # initialise instance values with measured 
+        self.errs = np.zeros((self.nor, self.noc), dtype=float) # count error
+        self.LEs = np.zeros((self.nor, self.noc), dtype=float) # Earth radiance
+        self.Lerrs = np.zeros((self.nor, self.noc), dtype=float) # radiance error
         
         # compute instance values and errors (both 2D np arrays)
-        rpxErr = ierr.getPxErr()  # relative err at pixel level
-        rlnErr = ierr.getSlnErr() # relative err at scanline
-        for i in range(self.nor): # is it better to use local vars NoR, NoC ??
-            lnStd = rlnErr * self.pxs[i,1] # scanline i standard deviation  
-            lnErr = random.gauss(0, lnStd)
+        for i in range(self.nor): 
             # Use Weibull distribution instead of Gaussian
-#            lnErr = random.weibullvariate(1, lnStd)
             
             for j in range(self.noc):
-                pxStd = rpxErr * self.pxs[i,j] # standard dev. for pixel (i,j)
-                pxErr = random.gauss(0, pxStd)
-                self.errs[i,j] = lnErr + pxErr
+                CEU = ierr.getCntU() # get ICT count uncertainty 
+                pxErr = random.gauss(0, CEU)
+                self.errs[i,j] = pxErr
                 self.pxs[i,j] -= self.errs[i,j] # remove error from measured
       
     def getInstErrs(self): # get instance errors as a 2D array
@@ -254,7 +288,7 @@ class eInstance(ImgBand):
     """ Perform an alternate computation of ensemble instances (for testing), 
     add errors to the measurements image: instance value = meas + err. """        
     def compAPxs(self, measImg):
-        apxs = measImg.getIVals() + self.errs
+        apxs = measImg.getDNs() + self.errs
         return apxs
 
 
@@ -284,9 +318,8 @@ class Ensemble(object):
         
         # create GUM uncertainty image
         self.gumU = ImgBand(noR,noC) # initialise uncertainty image
-        # ensemble's constant relative uncert -> will CHANGE, based on Error 
-        rU = ((measErr.getPxErr())**2 + (measErr.getSlnErr())**2)**0.5 
-        unc = rU*abs(measImg.getIVals()) # full array uncertainty
+        # ensemble's constant count uncert -> to CHANGE for radiance uncert.
+        unc = self.errStr.getCntU() * np.ones((noR, noC), dtype=float)
         self.gumU.setIVals(unc)
     
     def getESize(self): # get the size of the ensemble, i.e. no of instances
@@ -333,8 +366,7 @@ Its attributes define the content of full-FCDR. They are:
         * Earth and calibration counts per band
         * internal calibration target (ICT/IWCT) temperature
     - error structure inferred from the structure of harmonisation vars 
-        * error in counts (different per count type, i.e. Earth, ICT, space;
-                            and band ??) 
+        * error in counts (different per count type, i.e. Earth from ICT &space) 
         * error in ICT temperature
     - ... """
 class instrument(object):

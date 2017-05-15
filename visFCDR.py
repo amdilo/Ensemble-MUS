@@ -109,7 +109,7 @@ def plotMeasured(truth, measured, error, zran=None):
     """ Collect values for plotting the graph and histogram """
     atruth = truth.getPxVal(0,0) # constant value used for truth
     # Constant uncertainty of measured from constant truth and relative errs
-    mU = abs(atruth) * (error.getPxErr()**2 + error.getSlnErr()**2)**0.5
+    mU = abs(atruth) * error.getCntU()
 
     # Summary statistics of the (simulated) measured image values
     mVals = measured.getValArr() # image values as 1D array
